@@ -3,6 +3,7 @@
 // Open the "Challenge" button in the footer, adjust the options, and press "Start". You have a time limit to score as
 // many author times as you can on random tracks:
 //   * Author time on a track:  +1 point, and the next track starts after a short delay (3 seconds by default).
+//                              The clock is paused during that delay.
 //   * Gold (but not author):   you may skip this track for free, or keep trying for the author time.
 //                              The gold time is computed from the author time (see GoldTime), so no website is needed.
 //   * Skip key or button:      loads the next random track. It costs one free skip, unless you got gold on this track.
@@ -19,10 +20,16 @@ int FreeSkips = 3;
 [Setting name="Track pool" choices="Game tracks + subscribed workshop maps|Game tracks + any workshop map" description="Subscribed: only your own subscribed workshop maps that are already on your computer (any that would need a download are skipped). Any workshop map: top-rated workshop maps, which Steam may need to download first."]
 string TrackPool = "Game tracks + subscribed workshop maps";
 
+[Setting name="Workshop map limit" description="How many maps of the workshop list can be picked. The list is the top-rated maps (or your subscribed maps), best first, so 500 means only the 500 best. Type any number, at least 1."]
+int WorkshopCap = 5000;
+
+[Setting name="Game track share (%)" min=0 max=100 description="Chance that a pick is a game track when using 'any workshop map'. 15 means 15% game tracks, the rest workshop maps. 0 = workshop maps only, 100 = game tracks only. Not used for subscribed maps, where every track has the same chance."]
+int OfficialShare = 15;
+
 [Setting name="Skip key code" hidden]
 int SkipKeyCode = int(Input::K);         // Set from the key box in the Challenge menu.
 
-[Setting name="Delay after author time (seconds)" min=0 max=10 description="How long to wait after an author time before the next track starts."]
+[Setting name="Delay after author time (seconds)" min=0 max=10 description="How long to wait after an author time before the next track starts. The clock is paused during this delay."]
 float AuthorDelay = 3;
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -43,8 +50,6 @@ const double GOLD_MULTIPLIER = 1.06;
 const int64 OLD_FORMULA_BEFORE = 1789732800;     // 2026-09-18 12:00 UTC, in seconds since 1970.
 
 const int WORKSHOP_PAGE = 50;            // Maps per workshop results page.
-const int WORKSHOP_MAX_PAGES = 100;      // How deep into the top-rated list "any workshop map" reaches.
-const int OFFICIAL_SHARE = 15;           // Percent of picks that are game tracks in "any workshop map" mode.
 const int RECENT_KEEP = 25;              // A track is not repeated until this many others have been played.
 const double STUCK_SECONDS = 20;         // After this long without progress, the Back to race button appears.
 
@@ -61,6 +66,10 @@ UI::Button@ hideTimerButton;
 bool listeningKey = false;
 int keyListenDelay = 0;
 UI::TextInput@ delayInput;
+UI::TextInput@ capInput;
+UI::Slider@ shareSlider;
+UI::Text@ shareText;
+bool shareDragging = false;
 UI::Text@ statusText;
 UI::Text@ bestText;
 UI::Button@ startButton;
@@ -73,7 +82,7 @@ float menuFooter = -1;
 int pendingStart = 0;                    // Frames until typed values have been committed and the challenge starts.
 
 // Indexes of this plugin's settings in the Settings:: list.
-int idxTime = -1, idxSkips = -1, idxPool = -1, idxKey = -1, idxDelay = -1;
+int idxTime = -1, idxSkips = -1, idxPool = -1, idxKey = -1, idxDelay = -1, idxCap = -1, idxShare = -1;
 
 // The HUD during a challenge.
 UI::Window@ hud;
@@ -426,7 +435,8 @@ void PickNext()
             }
             else
             {
-                useWorkshop = Rand(100) >= OFFICIAL_SHARE;
+                int share = OfficialShare < 0 ? 0 : (OfficialShare > 100 ? 100 : OfficialShare);
+                useWorkshop = Rand(100) >= share;
                 index = Rand(wsTotal);
             }
         }
@@ -653,18 +663,22 @@ void TickChallenge(double dt, bool skipRequested)
     lastTimerUpdate = now;
     timerUpdateReady = true;
 
-    // The clock runs only while racing on a track; loading states discard their elapsed time.
+    // The clock runs only while racing on a track; loading states discard their elapsed time, and so does the
+    // delay after an author time (S_AUTHOR), which is a pause.
     if (state == S_RACING || state == S_AUTHOR)
     {
         if (Race::OnTrack())
         {
             lostSince = -1;
-            timeLeft -= timerDt;
-            if (timeLeft <= 0)
+            if (state == S_RACING)
             {
-                timeLeft = 0;
-                EndChallenge(true);
-                return;
+                timeLeft -= timerDt;
+                if (timeLeft <= 0)
+                {
+                    timeLeft = 0;
+                    EndChallenge(true);
+                    return;
+                }
             }
         }
         else if (lostSince < 0)
@@ -688,7 +702,7 @@ void TickChallenge(double dt, bool skipRequested)
             if (s == "done")
             {
                 wsTotal = Workshop::Total(pageQuery);
-                int cap = WORKSHOP_PAGE * WORKSHOP_MAX_PAGES;
+                int cap = WorkshopCap < 1 ? 1 : WorkshopCap;
                 if (wsTotal > cap)
                     wsTotal = cap;
                 ready = true;
@@ -799,6 +813,9 @@ void SyncMenu()
     timeInput.value = "" + TimeLimitMinutes;
     skipsInput.value = "" + FreeSkips;
     delayInput.value = formatFloat(AuthorDelay, "", 0, 1);
+    capInput.value = "" + WorkshopCap;
+    shareSlider.value = OfficialShare / 100.0f;
+    shareText.text = "" + OfficialShare + "%";
     poolDropdown.selected = IndexOf(POOL_CHOICES, TrackPool);
     keyButton.label = listeningKey ? "Press a key..." : Input::Name(SkipKey());
 }
@@ -820,6 +837,18 @@ void ReadMenu()
         Commit(idxSkips, skipsInput.text);
     if (delayInput.Submitted())
         Commit(idxDelay, delayInput.text);
+    if (capInput.Submitted())
+        Commit(idxCap, capInput.text);
+    if (shareSlider.dragging)
+    {
+        shareDragging = true;
+        shareText.text = "" + int(shareSlider.value * 100.0f + 0.5f) + "%";
+    }
+    else if (shareDragging)
+    {
+        shareDragging = false;              // Let go: save the value once.
+        Commit(idxShare, "" + int(shareSlider.value * 100.0f + 0.5f));
+    }
     if (poolDropdown.Changed())
         Commit(idxPool, POOL_CHOICES[poolDropdown.selected]);
     if (keyButton.Clicked() && !listeningKey)
@@ -835,6 +864,7 @@ void SubmitAll()
     timeInput.Submit();
     skipsInput.Submit();
     delayInput.Submit();
+    capInput.Submit();
 }
 
 void UpdateMenu()
@@ -976,6 +1006,16 @@ void Main()
         poolDropdown.AddOption(POOL_CHOICES[i]);
     menu.NewRow();
 
+    Label("Workshop map limit");
+    @capInput = menu.AddTextInput(110, "5000", 18);
+    capInput.clearOnSubmit = false;
+    menu.NewRow();
+
+    Label("Game track spawn rate");
+    @shareSlider = menu.AddSlider(200);
+    @shareText = menu.AddText("15%", 18);
+    menu.NewRow();
+
     Label("Skip key");
     @keyButton = menu.AddButton(Input::Name(SkipKey()));
     menu.NewRow();
@@ -1012,6 +1052,8 @@ void Main()
     idxPool = FindSetting(id, "Track pool");
     idxKey = FindSetting(id, "Skip key code");
     idxDelay = FindSetting(id, "Delay after author time (seconds)");
+    idxCap = FindSetting(id, "Workshop map limit");
+    idxShare = FindSetting(id, "Game track share (%)");
 
     // The HUD.
     @hud = UI::CreateWindow();

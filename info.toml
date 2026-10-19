@@ -1,6 +1,6 @@
 [meta]
 name = "Author Time Challenge"
-version = "0.6.0"
+version = "0.7.0"
 author = "PetitRomeo"
 description = "Race random tracks against the clock. Every author time scores a point, gold lets you skip for free, and you get a few free skips."
 min_host = "0.26.0"
